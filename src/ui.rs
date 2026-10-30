@@ -586,7 +586,13 @@ impl Inner {
 
     /// Client height in DIPs (main view + trimmer).
     fn client_h(&self) -> f32 {
-        (if self.state.borrow().compact { COMPACT_H } else { FULL_H }) + self.trim_height()
+        // from the window itself: paint holds the trim state, so trim_height()
+        // (which borrows it) would panic when a tooltip asks mid-paint
+        let mut rc = RECT::default();
+        unsafe {
+            let _ = GetClientRect(self.hwnd.get(), &mut rc);
+        }
+        rc.bottom as f32 / self.scale()
     }
 
     /// Wait for the next key combo as the new `which` shortcut. The current
