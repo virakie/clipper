@@ -1,0 +1,10 @@
+/target
+/dist
+/scratch
+/tests
+/.impeccable
+/release
+STATUS.md
+CLAUDE.md
+*.log
+clipper.ini
