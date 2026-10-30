@@ -556,7 +556,9 @@ impl Inner {
         };
         let stem = file.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "clip".into());
         let dir = file.parent().map(|d| d.to_path_buf()).unwrap_or_default();
-        let Some(dst) = save_dialog(self.hwnd.get(), &dir, &format!("{stem}_trim.mp4")) else { return };
+        // mpv's trim naming: TRIMMED_<name> (not TRIMMED_TRIMMED_ on a re-trim)
+        let stem = stem.strip_prefix("TRIMMED_").unwrap_or(&stem);
+        let Some(dst) = save_dialog(self.hwnd.get(), &dir, &format!("TRIMMED_{stem}.mp4")) else { return };
         {
             let mut t = self.trim.borrow_mut();
             t.exporting = true;
