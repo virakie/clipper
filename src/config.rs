@@ -51,10 +51,9 @@ brave.exe, opera.exe, mpv.exe, vlc.exe, mpc-hc64.exe, potplayermini64.exe, obs64
 cinema 4d.exe, houdinifx.exe, blender.exe, applicationframehost.exe, steam.exe, steamwebhelper.exe, \
 discord.exe, code.exe, claude.exe, jellyfin.exe, kodi.exe, textinputhost.exe, lockapp.exe";
 
-/// Videos\Clipper in the user's profile.
+/// Clips next to clipper.exe: the folder carries everything.
 fn default_out() -> PathBuf {
-    let home = std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join("Videos").join("Clipper")
+    exe_dir().join("Clips")
 }
 const DEFAULT_SAVE_SOUND: &str = r"C:\Windows\Media\Speech On.wav";
 const DEFAULT_ERROR_SOUND: &str = r"C:\Windows\Media\Speech Misrecognition.wav";
@@ -86,6 +85,7 @@ fn default_text() -> String {
          # ffmpeg 8.0+ (needs gfxcapture). auto = ffmpeg.exe next to clipper.exe,\n\
          # then scoop, then PATH. Or a full path to ffmpeg.exe.\n\
          ffmpeg = auto\n\
+         # where clips go; a relative path is inside Clipper's folder\n\
          output_dir = {out}\n\
          # Clip length in seconds\n\
          seconds = 120\n\
@@ -113,7 +113,7 @@ fn default_text() -> String {
          hotkey_window = Ctrl+Alt+C\n\
          # Fullscreen apps that are never 'games' (comma separated exe names)\n\
          exclude = {ex}\n",
-        out = default_out().display(),
+        out = "Clips",
         snd = DEFAULT_SAVE_SOUND,
         err = DEFAULT_ERROR_SOUND,
         dev = DEFAULT_DEVICE,
@@ -170,7 +170,8 @@ impl Config {
                         c.ffmpeg = PathBuf::from(v)
                     }
                 }
-                "output_dir" => c.output_dir = PathBuf::from(v),
+                // relative = inside Clipper's folder, so the folder can move
+                "output_dir" => c.output_dir = exe_dir().join(v),
                 "seconds" => c.seconds = num(120).clamp(5, MAX_SECONDS),
                 "fps" => c.fps = num(60).clamp(10, 360),
                 "height" => c.height = num(1080).clamp(240, 4320),

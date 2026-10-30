@@ -106,7 +106,7 @@ fn save(
     }
 
     let id = format!("{}_{}", std::process::id(), stamp());
-    let tmp = std::env::temp_dir();
+    let tmp = crate::util::temp_dir();
     let vpath = tmp.join(format!("clipper_{id}.h264"));
     let apath = tmp.join(format!("clipper_{id}.pcm"));
     std::fs::write(&vpath, &h264).map_err(|e| e.to_string())?;

@@ -34,6 +34,13 @@ pub fn exe_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// Scratch files (save + trim intermediates) stay in the portable folder;
+/// Windows' temp folder only if that one can't be written.
+pub fn temp_dir() -> PathBuf {
+    let d = exe_dir().join("temp");
+    if std::fs::create_dir_all(&d).is_ok() { d } else { std::env::temp_dir() }
+}
+
 /// "261019-172603" (two-digit year) in local time; clips are "<name>_<stamp>.mp4".
 pub fn stamp() -> String {
     let t = unsafe { GetLocalTime() };

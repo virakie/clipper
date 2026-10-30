@@ -307,7 +307,7 @@ pub fn export(
     let dur = (end - start).max(0.1);
     let limit = (target_mb * 1_000_000.0) as u64;
     let mut vkbps = plan.vkbps as f64;
-    let log = std::env::temp_dir().join(format!("clipper_trim_{}", std::process::id()));
+    let log = crate::util::temp_dir().join(format!("clipper_trim_{}", std::process::id()));
     let passes = if plan.codec == Codec::H264 { 2 } else { 1 };
     for attempt in 0..3 {
         for pass in 1..=passes {

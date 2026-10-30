@@ -27,20 +27,24 @@ recording.
 
 - Windows 11 (tested). Windows 10 should work but hasn't been tried.
 - An **NVIDIA GPU** (recording uses the NVENC hardware encoder).
-- **ffmpeg 8.0 or newer** (needs the `gfxcapture` screen grabber). Put
-  `ffmpeg.exe` next to `clipper.exe`, or have it on your PATH (scoop's ffmpeg is
-  found too). Builds: https://www.gyan.dev/ffmpeg/builds/ or
-  https://github.com/BtbN/FFmpeg-Builds/releases
 
-## Install
+## Install (portable)
 
-1. Download the zip from [Releases](../../releases) and unzip it anywhere.
-2. Put `ffmpeg.exe` in the same folder (see above).
-3. Run `clipper.exe`. A red dot appears in the tray; the window opens with
+1. Download `Clipper-x.y.z-win64-portable.zip` from [Releases](../../releases)
+   and unzip it anywhere (a USB stick works too).
+2. Run `clipper.exe`. A red dot appears in the tray; the window opens with
    `Ctrl+Alt+C`.
-4. Optional: menu > Start with Windows.
 
-Clips go to `Videos\Clipper` (menu > Save folder to change it).
+Everything stays in that folder: settings (`clipper.ini`), logs, scratch files
+(`temp`) and your clips (`Clips`, or pick another folder in the menu). Move or
+delete the folder and Clipper is gone. The only things it touches outside are
+the tray icon's "always show" flag, and the Windows startup entry if you turn
+on menu > Start with Windows.
+
+The portable zip includes ffmpeg 8.1.1 (GPLv3, full build from
+https://www.gyan.dev/ffmpeg/builds/, source at https://ffmpeg.org/download.html).
+Already have ffmpeg 8.0+? The small `Clipper-x.y.z-win64.zip` is just Clipper;
+it uses `ffmpeg.exe` next to it, then scoop's, then the one on your PATH.
 
 ## Command line
 
