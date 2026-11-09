@@ -19,6 +19,7 @@ mod hotkey;
 mod save;
 mod trim;
 mod ui;
+mod update;
 mod util;
 mod video;
 
@@ -61,6 +62,8 @@ pub const WM_UI_CMD: u32 = WM_APP + 2;
 /// a save finished
 const WM_SAVED: u32 = WM_APP + 3;
 const TIMER_TICK: usize = 1;
+/// after an automatic switch, seconds without the game before going back
+const AUTO_BACK_SECS: u32 = 30;
 const TIMER_UI: usize = 2;
 const HOTKEY_SAVE: i32 = 1;
 const HOTKEY_WINDOW: i32 = 2;
@@ -71,6 +74,7 @@ const ID_GAME: u32 = 12;
 const ID_OFF: u32 = 13;
 const ID_SAVE: u32 = 20;
 const ID_FOLDER: u32 = 21;
+const ID_UPDATE: u32 = 22;
 const ID_QUIT: u32 = 30;
 const RED: (u8, u8, u8) = (0xC9, 0x36, 0x1B);
 const GREY: (u8, u8, u8) = (0x6e, 0x6e, 0x74);
@@ -132,6 +136,9 @@ struct App {
     retry_at: u32,
     icon_on: HICON,
     icon_off: HICON,
+    /// same discs with a G, shown in Game mode
+    icon_game_on: HICON,
+    icon_game_off: HICON,
     // settings the window changes (written back to clipper.ini)
     audio_mode: String,
     /// chosen frame rate / output lines, and what the current capture uses
@@ -156,10 +163,19 @@ struct App {
     mics: Vec<DeviceInfo>,
     prefs: std::collections::BTreeMap<String, String>,
     startup_mode: String,
+    /// monitor modes jump to Game mode while a game is in front
+    auto_game: bool,
+    /// the monitor mode to go back to after an automatic switch to Game mode
+    auto_from: Option<Mode>,
+    /// seconds the auto-switched game has been gone
+    auto_idle: u32,
     /// global shortcuts as text ("Shift+F3", "off"), and why one didn't register
     hotkey_save: String,
     hotkey_window: String,
     hotkey_error: String,
+    /// look for new releases (ini update_check), and the version already announced
+    update_check: bool,
+    update_told: String,
 }
 
 const RUN_KEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
@@ -284,7 +300,7 @@ fn level_text(ring: &Mutex<AudioRing>, running: bool) -> (f32, String) {
     }
     let a = ring.lock().unwrap();
     if a.last_push == 0 || util::now_100ns() - a.last_push > 15_000_000 {
-        return (-100.0, "nothing playing".into());
+        return (-100.0, "silent".into());
     }
     let db = a.level_db(0.4);
     if db < -60.0 { (-100.0, "silent".into()) } else { (db, format!("{db:.0} dB")) }
@@ -303,11 +319,13 @@ impl App {
         }
     }
 
-    /// What to record for sound. `game_pid` is set when a game is captured.
+    /// What to record for sound. `game_pid` is set when a game is captured:
+    /// then only the game's own sound goes in, never music or videos playing
+    /// beside it. Other modes record everything on the chosen device.
     fn audio_source(&self, game_pid: Option<u32>) -> Option<AudioSource> {
         match (self.audio_mode.as_str(), game_pid) {
             ("off", _) => None,
-            ("game", Some(pid)) => Some(AudioSource::Process(pid)),
+            (_, Some(pid)) => Some(AudioSource::Process(pid)),
             _ => Some(AudioSource::Device(find_device(&audio::list_devices(), &self.audio_device))),
         }
     }
@@ -365,6 +383,8 @@ impl App {
     fn set_mode(&mut self, mode: Mode) {
         log(format!("mode -> {mode:?}"));
         self.mode = mode;
+        self.auto_from = None;
+        self.auto_idle = 0;
         self.stop_capture();
         self.target = None;
         self.last_game = None;
@@ -416,6 +436,10 @@ impl App {
 
     fn tick(&mut self) {
         self.ticks += 1;
+        // look for a new release 15 s after start, then every 6 hours
+        if self.update_check && (self.ticks == 15 || self.ticks % 21600 == 0) {
+            update::check(self.hwnd.0 as isize, false);
+        }
         // ffmpeg died (window closed mid-capture, driver hiccup, ...)
         if self.pipe.as_ref().is_some_and(|p| !p.alive.load(Ordering::SeqCst)) {
             log("capture ended");
@@ -425,8 +449,9 @@ impl App {
         }
         match self.mode {
             Mode::Game => {
+                // closed, or hidden (an overlay that's done) counts as gone
                 if let Some(t) = &self.target
-                    && !unsafe { IsWindow(Some(t.hwnd)) }.as_bool()
+                    && !unsafe { IsWindow(Some(t.hwnd)).as_bool() && IsWindowVisible(t.hwnd).as_bool() }
                 {
                     log(format!("{} closed", t.exe));
                     self.stop_capture(); // keep the buffer: it can still be saved
@@ -449,8 +474,31 @@ impl App {
                     self.last_game = Some(file_name_for(&t));
                     self.target = Some(t);
                 }
+                // auto-switched here: go back once the game has been gone a while
+                // (the grace period leaves time to save the last moments)
+                if let Some(back) = self.auto_from {
+                    if self.target.is_some() {
+                        self.auto_idle = 0;
+                    } else {
+                        self.auto_idle += 1;
+                        if self.auto_idle >= AUTO_BACK_SECS {
+                            log("auto: game gone, back to the monitor");
+                            self.set_mode(back);
+                            return;
+                        }
+                    }
+                }
             }
             Mode::Monitor(_) => {
+                // a game in front: record just the game (and only its sound)
+                if self.auto_game && detect::foreground_game(&self.cfg).is_some() {
+                    let back = self.mode;
+                    log("auto: game in front, switching to Game mode");
+                    self.set_mode(Mode::Game);
+                    self.auto_from = Some(back);
+                    self.push_ui();
+                    return;
+                }
                 if self.pipe.is_none() && self.ticks >= self.retry_at {
                     self.start_monitor();
                 }
@@ -542,6 +590,7 @@ impl App {
             last,
             last_ok,
             startup: startup_enabled(),
+            auto_game: self.auto_game,
             startup_mode: self.startup_mode.clone(),
             compact: self.prefs.get("view").is_some_and(|v| v == "compact"),
             height: self.res_height,
@@ -554,7 +603,69 @@ impl App {
             hotkey_save: self.hotkey_save.clone(),
             hotkey_window: self.hotkey_window.clone(),
             hotkey_error: self.hotkey_error.clone(),
+            version: update::current(),
+            update_check: self.update_check,
+            update_ver: update::STATE.lock().unwrap().available.as_ref().map(|r| r.version.clone()).unwrap_or_default(),
+            update_busy: update::STATE.lock().unwrap().busy.clone(),
         }
+    }
+
+    /// A Windows notification from the tray icon.
+    fn notify(&self, title: &str, text: &str) {
+        let mut nid = NOTIFYICONDATAW {
+            cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+            hWnd: self.hwnd,
+            uID: 1,
+            uFlags: NIF_INFO,
+            dwInfoFlags: NIIF_INFO,
+            ..Default::default()
+        };
+        let t: Vec<u16> = title.encode_utf16().take(63).collect();
+        nid.szInfoTitle[..t.len()].copy_from_slice(&t);
+        let b: Vec<u16> = text.encode_utf16().take(255).collect();
+        nid.szInfo[..b.len()].copy_from_slice(&b);
+        unsafe {
+            let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
+        }
+    }
+
+    /// An update thread finished.
+    fn update_event(&mut self, ev: usize) {
+        let (available, message, manual) = {
+            let s = update::STATE.lock().unwrap();
+            (s.available.as_ref().map(|r| r.version.clone()), s.message.clone(), s.manual)
+        };
+        match ev {
+            update::EV_CHECKED => match available {
+                // tell once per version, or whenever the user asked
+                Some(v) if manual || self.update_told != v => {
+                    self.notify(&format!("Clipper v{v} is available"), "Open Clipper's menu (or right-click the tray icon) and pick \"Update to ...\".");
+                    self.update_told = v;
+                }
+                None if manual => self.notify("Clipper is up to date", &message),
+                _ => {}
+            },
+            update::EV_READY => {
+                let mut args = vec!["--mode".to_string(), self.mode.key().to_string()];
+                if self.ui_visible() {
+                    args.push("--show".into());
+                }
+                *update::RESTART.lock().unwrap() = Some(args);
+                // quit outside this borrow of the app (quit needs it too)
+                ui::QUEUE.lock().unwrap().push_back("quit".into());
+                unsafe {
+                    let _ = PostMessageW(Some(self.hwnd), WM_UI_CMD, WPARAM(0), LPARAM(0));
+                }
+                return;
+            }
+            _ => {
+                // auto checks fail quietly (offline); asked-for ones and installs don't
+                if manual || message.starts_with("Update failed") {
+                    self.notify("Clipper update", &message);
+                }
+            }
+        }
+        self.push_ui();
     }
 
     /// (Re)register both global shortcuts; a combo another app already owns
@@ -632,7 +743,12 @@ impl App {
             uID: 1,
             uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
             uCallbackMessage: WM_TRAY,
-            hIcon: if self.capturing() { self.icon_on } else { self.icon_off },
+            hIcon: match (self.mode == Mode::Game, self.capturing()) {
+                (false, true) => self.icon_on,
+                (false, false) => self.icon_off,
+                (true, true) => self.icon_game_on,
+                (true, false) => self.icon_game_off,
+            },
             ..Default::default()
         };
         let tip: Vec<u16> = self.tooltip().encode_utf16().take(127).collect();
@@ -672,6 +788,7 @@ impl App {
             save_sound: self.cfg.save_sound.clone(),
             error_sound: self.cfg.error_sound.clone(),
             audio_gain: self.audio_volume as f32 / 100.0,
+            audio_boost: self.cfg.audio_boost,
             mic_gain: self.mcap.as_ref().map(|_| self.mic_volume as f32 / 100.0),
             notify: self.hwnd.0 as isize,
             notify_msg: WM_SAVED,
@@ -705,6 +822,15 @@ impl App {
             add(MF_STRING, ID_SAVE, &format!("Save clip now\t{}", self.hotkey_save));
             add(MF_STRING, ID_FOLDER, "Open clips folder");
             add(MF_SEPARATOR, 0, "");
+            let (avail, busy) = {
+                let s = update::STATE.lock().unwrap();
+                (s.available.as_ref().map(|r| r.version.clone()), s.busy.clone())
+            };
+            if !busy.is_empty() {
+                add(MF_STRING | MF_GRAYED, 0, &busy);
+            } else if let Some(v) = avail {
+                add(MF_STRING, ID_UPDATE, &format!("Update to v{v}"));
+            }
             add(MF_STRING, ID_QUIT, "Quit Clipper");
             let mut p = POINT::default();
             let _ = GetCursorPos(&mut p);
@@ -756,17 +882,44 @@ fn promote_tray_icon() {
     }
 }
 
-/// GuideBook's icon shape: a flat disc (r = 120/256 of the canvas).
-fn make_icon(rgb: (u8, u8, u8)) -> HICON {
+/// Inside a white "G" drawn on the disc? Coordinates relative to the centre,
+/// in pixels of a 32 px icon: a ring open at the upper right plus a bar
+/// pointing into the middle.
+fn in_g(dx: f32, dy: f32) -> bool {
+    let (r, w) = (8.0, 3.6); // ring radius and stroke width
+    let d = (dx * dx + dy * dy).sqrt();
+    let angle = dy.atan2(dx).to_degrees(); // 0 = right, -90 = up (y points down)
+    let ring = (d - r).abs() <= w / 2.0 && !(-75.0..-5.0).contains(&angle);
+    let bar = dy.abs() <= w / 2.0 && dx >= 0.0 && dx <= r + w / 2.0;
+    ring || bar
+}
+
+/// GuideBook's icon shape: a flat disc (r = 120/256 of the canvas), with a
+/// white G on it in Game mode so it's obvious only the game is heard.
+fn make_icon(rgb: (u8, u8, u8), g: bool) -> HICON {
     const S: i32 = 32;
+    const SS: i32 = 4; // 4x4 samples per pixel for smooth edges
     let r = 120.0 / 256.0 * S as f32;
     let mut px = vec![0u32; (S * S) as usize];
     for y in 0..S {
         for x in 0..S {
-            let (dx, dy) = (x as f32 + 0.5 - S as f32 / 2.0, y as f32 + 0.5 - S as f32 / 2.0);
-            let a = (r - (dx * dx + dy * dy).sqrt() + 0.5).clamp(0.0, 1.0); // anti-aliased edge
+            let (mut disc, mut white) = (0.0f32, 0.0f32);
+            for sy in 0..SS {
+                for sx in 0..SS {
+                    let dx = x as f32 + (sx as f32 + 0.5) / SS as f32 - S as f32 / 2.0;
+                    let dy = y as f32 + (sy as f32 + 0.5) / SS as f32 - S as f32 / 2.0;
+                    if dx * dx + dy * dy <= r * r {
+                        disc += 1.0;
+                        if g && in_g(dx, dy) {
+                            white += 1.0;
+                        }
+                    }
+                }
+            }
+            let a = disc / (SS * SS) as f32;
             if a > 0.0 {
-                let c = |v: u8| (v as f32 * a) as u32; // premultiplied
+                let wf = if disc > 0.0 { white / disc } else { 0.0 };
+                let c = |v: u8| ((v as f32 * (1.0 - wf) + 255.0 * wf) * a) as u32; // premultiplied
                 px[(y * S + x) as usize] = ((a * 255.0) as u32) << 24 | c(rgb.0) << 16 | c(rgb.1) << 8 | c(rgb.2);
             }
         }
@@ -833,6 +986,7 @@ fn run_menu_command(hwnd: HWND, id: u32) {
         ID_OFF => handle_command(hwnd, "mode off"),
         ID_SAVE => handle_command(hwnd, "save"),
         ID_FOLDER => handle_command(hwnd, "openfolder"),
+        ID_UPDATE => handle_command(hwnd, "update install"),
         ID_QUIT => handle_command(hwnd, "quit"),
         _ => {}
     }
@@ -878,6 +1032,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         }
         WM_SAVED => {
             with_app(|a| a.push_ui());
+            LRESULT(0)
+        }
+        update::WM_UPDATE => {
+            with_app(|a| a.update_event(wp.0));
             LRESULT(0)
         }
         WM_COPYDATA => {
@@ -1081,6 +1239,17 @@ fn handle_command(hwnd: HWND, cmd: &str) {
                 });
             }
         }
+        "auto" => {
+            with_app(|a| {
+                a.auto_game = on;
+                config::set_value("auto_game", if on { "on" } else { "off" });
+                // turned off while auto-switched: back to the monitor now
+                if !on && let Some(back) = a.auto_from {
+                    a.set_mode(back);
+                }
+                a.push_ui();
+            });
+        }
         "startup" => {
             with_app(|a| {
                 set_startup(on, &a.startup_mode);
@@ -1141,6 +1310,18 @@ fn handle_command(hwnd: HWND, cmd: &str) {
         "save" => {
             with_app(|a| a.save());
         }
+        "update" => {
+            // "update check" / "update install" / "update on|off" (automatic checks)
+            match arg {
+                "check" => update::check(hwnd.0 as isize, true),
+                "install" => update::install(hwnd.0 as isize),
+                _ => {
+                    with_app(|a| a.update_check = on);
+                    config::set_value("update_check", if on { "on" } else { "off" });
+                }
+            }
+            with_app(|a| a.push_ui());
+        }
         "quit" => {
             // close the window first: Windows destroys owned windows before
             // our WM_DESTROY, which would lose the window position
@@ -1188,6 +1369,7 @@ fn main() {
             "--toggle" => ("toggle", false),
             "--save" => ("save", false),
             "--quit" => ("quit", false),
+            "--update" => ("update", true),
             _ => ("", false),
         };
         if !verb.is_empty() {
@@ -1212,7 +1394,8 @@ fn main() {
         // the UI thread lists devices and hosts WebView2: single-threaded COM
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         let cfg = Arc::new(Config::load());
-        log(format!("--- Clipper start, ffmpeg = {}", cfg.ffmpeg.display()));
+        log(format!("--- Clipper v{} start, ffmpeg = {}", update::current(), cfg.ffmpeg.display()));
+        update::cleanup();
         log(format!(
             "audio = {} on '{}', mic = {} on '{}' (Windows defaults: '{}', '{}')",
             cfg.audio,
@@ -1252,8 +1435,10 @@ fn main() {
             saving: Arc::new(AtomicBool::new(false)),
             ticks: 0,
             retry_at: 0,
-            icon_on: make_icon(RED),
-            icon_off: make_icon(GREY),
+            icon_on: make_icon(RED, false),
+            icon_off: make_icon(GREY, false),
+            icon_game_on: make_icon(RED, true),
+            icon_game_off: make_icon(GREY, true),
             audio_mode: cfg.audio.clone(),
             last_audio_on: if cfg.audio == "off" { "game".into() } else { cfg.audio.clone() },
             audio_device: cfg.audio_device.clone(),
@@ -1270,9 +1455,14 @@ fn main() {
             mics: Vec::new(),
             prefs: cfg.prefs.clone(),
             startup_mode: cfg.startup_mode.clone(),
+            auto_game: cfg.auto_game,
+            auto_from: None,
+            auto_idle: 0,
             hotkey_save: cfg.hotkey_save.clone(),
             hotkey_window: cfg.hotkey_window.clone(),
             hotkey_error: String::new(),
+            update_check: cfg.update_check,
+            update_told: String::new(),
         };
         TASKBAR_CREATED.store(RegisterWindowMessageW(w!("TaskbarCreated")), Ordering::SeqCst);
         APP.with(|a| *a.borrow_mut() = Some(app));
@@ -1292,5 +1482,6 @@ fn main() {
         }
         APP.with(|a| *a.borrow_mut() = None);
         log("--- Clipper exit");
+        update::restart_if_asked();
     }
 }

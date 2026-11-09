@@ -27,6 +27,8 @@ pub struct Config {
     pub audio_device: String,
     /// percent applied to the recorded sound, 0-200
     pub audio_volume: u32,
+    /// raise quiet sound on save so its loudest moment sits just under full
+    pub audio_boost: bool,
     pub mic: bool,
     pub mic_device: String,
     /// percent, 0-200
@@ -38,6 +40,10 @@ pub struct Config {
     pub prefs: std::collections::BTreeMap<String, String>,
     /// mode Clipper starts in when launched with Windows
     pub startup_mode: String,
+    /// monitor modes switch to Game mode while a game is in front
+    pub auto_game: bool,
+    /// look for a newer release on GitHub at start (and every 6 h)
+    pub update_check: bool,
     /// global shortcuts ("Shift+F3"; "off" = none)
     pub hotkey_save: String,
     pub hotkey_window: String,
@@ -99,11 +105,17 @@ fn default_text() -> String {
          av_offset_ms = 0\n\
          save_sound = {snd}\n\
          error_sound = {err}\n\
-         # Sound: game = only the game's own sound in Game mode (other modes use\n\
-         # audio_device), device = everything on audio_device, off = none\n\
+         # Sound: off = none, anything else = on. Game mode records only the game's own sound;\n\
+         # the other modes record everything playing on audio_device\n\
          audio = game\n\
          audio_device = {dev}\n\
          audio_volume = 100\n\
+         # on = quiet games are raised on save (loudest moment just under full volume)\n\
+         audio_boost = on\n\
+         # on = Main / Second... switch to Game mode while a game is in front\n\
+         auto_game = on\n\
+         # on = check GitHub for a newer Clipper (the menu offers the update)\n\
+         update_check = on\n\
          # Microphone, mixed into the clip: on/off, device name or default, volume %\n\
          mic = on\n\
          mic_device = default\n\
@@ -143,6 +155,7 @@ impl Config {
             audio: "game".into(),
             audio_device: DEFAULT_DEVICE.into(),
             audio_volume: 100,
+            audio_boost: true,
             mic: true,
             mic_device: "default".into(),
             mic_volume: 100,
@@ -150,6 +163,8 @@ impl Config {
             window_pos: None,
             prefs: Default::default(),
             startup_mode: "off".into(),
+            auto_game: true,
+            update_check: true,
             hotkey_save: crate::hotkey::DEFAULT_SAVE.into(),
             hotkey_window: crate::hotkey::DEFAULT_WINDOW.into(),
         };
@@ -184,6 +199,7 @@ impl Config {
                 "audio" => c.audio = v.to_lowercase(),
                 "audio_device" => c.audio_device = v.to_string(),
                 "audio_volume" => c.audio_volume = num(100).min(200),
+                "audio_boost" => c.audio_boost = on,
                 "mic" => c.mic = on,
                 "mic_device" => c.mic_device = v.to_string(),
                 "mic_volume" => c.mic_volume = num(100).min(200),
@@ -191,6 +207,8 @@ impl Config {
                 "window_x" => wx = v.parse().ok(),
                 "window_y" => wy = v.parse().ok(),
                 "startup_mode" => c.startup_mode = v.to_lowercase(),
+                "auto_game" => c.auto_game = on,
+                "update_check" => c.update_check = on,
                 "hotkey_save" => c.hotkey_save = v.to_string(),
                 "hotkey_window" => c.hotkey_window = v.to_string(),
                 k if k.starts_with("ui_") && PREF_KEYS.contains(&&k[3..]) => {

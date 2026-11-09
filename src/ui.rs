@@ -61,6 +61,7 @@ pub struct UiState {
     pub last: String,
     pub last_ok: bool,
     pub startup: bool,
+    pub auto_game: bool,
     pub startup_mode: String,
     pub compact: bool,
     /// chosen output lines, chosen fps, fps the capture actually runs at
@@ -78,6 +79,11 @@ pub struct UiState {
     pub hotkey_save: String,
     pub hotkey_window: String,
     pub hotkey_error: String,
+    /// this exe's version, automatic update checks, newer version found, update in progress
+    pub version: String,
+    pub update_check: bool,
+    pub update_ver: String,
+    pub update_busy: String,
 }
 
 /// not exported by the modules imported here
@@ -104,7 +110,6 @@ enum Hit {
     Mode,
     Save,
     Scissors,
-    Last,
     // trimmer
     Drop,
     Timeline,
@@ -260,7 +265,6 @@ fn layout(hit: Hit) -> D2D_RECT_F {
         Hit::Mode => rect(PAD + 191.0, y, 93.0, ROW_H),
         Hit::Save => rect(W - PAD - 46.0 - 70.0, y, 70.0, ROW_H),
         Hit::Scissors => rect(W - PAD - 40.0, y, 40.0, ROW_H),
-        Hit::Last => rect(PAD, PAD + ROW_H + 34.0, W - 2.0 * PAD, 20.0),
         _ => rect(0.0, 0.0, 0.0, 0.0),
     }
 }
@@ -475,36 +479,36 @@ impl Inner {
             self.text_at(g, "\u{E8C6}", &self.icons, layout(Hit::Scissors), p.text);
 
             if !st.compact {
-                // status lines
+                // one status line: what the clip will look like, how big the
+                // buffer is and how loud things are
                 let y1 = PAD + ROW_H + 10.0;
+                let mic = if st.mic_on { st.mic_level_text.as_str() } else { "off" };
                 let status = if st.mode == "off" {
-                    "Off: not recording".to_string()
+                    "Not recording".to_string()
                 } else if st.capturing {
-                    format!("Recording: {}  ·  {}p{}", st.what, st.height.min(st.src.1.max(1)), st.cur_fps)
+                    format!(
+                        "{}p{}  ·  {:.0} MB  ·  Sound {}  ·  Mic {}",
+                        st.height.min(st.src.1.max(1)),
+                        st.cur_fps,
+                        st.mb,
+                        st.level_text,
+                        mic
+                    )
                 } else {
                     st.what.clone()
                 };
-                // a shortcut another app owns is worth more than the status line
-                let (status, sc) = if st.hotkey_error.is_empty() {
-                    (status, p.sub)
-                } else {
+                // a shortcut another app owns or a failed save is worth more
+                let (status, sc) = if !st.hotkey_error.is_empty() {
                     (format!("{} taken by another app (Menu > Shortcuts)", st.hotkey_error), p.rec)
+                } else if !st.last.is_empty() && !st.last_ok {
+                    (st.last.clone(), p.rec)
+                } else {
+                    (status, p.sub)
                 };
                 self.text_at(g, &status, &self.small, rect(PAD, y1, W - 2.0 * PAD, 20.0), sc);
-                let last = if st.last.is_empty() {
-                    String::new()
-                } else if st.last_ok {
-                    format!("  |  Last: {}", st.last.split("  ").next().unwrap_or(""))
-                } else {
-                    format!("  |  {}", st.last)
-                };
-                let mb = if st.capturing { format!(" ({:.0} MB)", st.mb) } else { String::new() };
-                let line2 = format!("Buffer: {} / {}{}{}", clock(st.buffer), clock(st.seconds as f64), mb, last);
-                let lc = if self.hover.get() == Hit::Last && st.last_ok { p.text } else { p.sub };
-                self.text_at(g, &line2, &self.small, layout(Hit::Last), lc);
 
                 // level graph, FramePacer's frame-time panel turned into sound / mic
-                let gr = rect(PAD, PAD + ROW_H + 62.0, W - 2.0 * PAD, FULL_H - PAD - (PAD + ROW_H + 62.0));
+                let gr = rect(PAD, PAD + ROW_H + 38.0, W - 2.0 * PAD, FULL_H - PAD - (PAD + ROW_H + 38.0));
                 g.brush.SetColor(&p.panel);
                 g.rt.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: gr, radiusX: 8.0, radiusY: 8.0 }, &g.brush);
                 g.brush.SetColor(&p.grid);
@@ -525,7 +529,7 @@ impl Inner {
                 // starts under the legend so the line never runs through it.
                 let amp = |db: f32| if db <= -99.0 { 0.0 } else { 10f32.powf(db / 20.0) };
                 let peak = hist.iter().map(|s| amp(s.0).max(amp(s.1))).fold(0.01f32, f32::max);
-                let (top, bottom) = (gr.top + 28.0, gr.bottom - 6.0);
+                let (top, bottom) = (gr.top + 6.0, gr.bottom - 6.0);
                 let to_y = |db: f32| {
                     let v = (amp(db) / peak * 0.75).clamp(0.0, 1.0);
                     bottom - v * (bottom - top)
@@ -544,9 +548,6 @@ impl Inner {
                         prev = Some(pt);
                     }
                 }
-                // legend
-                let legend = format!("Sound {}   Mic {}", st.level_text, if st.mic_on { st.mic_level_text.as_str() } else { "off" });
-                self.text_at(g, &legend, &self.small, rect(gr.left + 10.0, gr.top + 6.0, gr.right - gr.left - 20.0, 18.0), p.sub);
             }
             // toolbar tooltip, drawn after the trimmer so it sits on top
             let tip: Option<(Hit, String, String)> = match self.hover.get() {
@@ -695,14 +696,10 @@ impl Inner {
     }
 
     fn hit_at(&self, x: f32, y: f32) -> Hit {
-        let compact = self.state.borrow().compact;
         for h in [Hit::Menu, Hit::Compact, Hit::Sound, Hit::Mic, Hit::Mode, Hit::Save, Hit::Scissors] {
             if inside(&layout(h), x, y) {
                 return h;
             }
-        }
-        if !compact && inside(&layout(Hit::Last), x, y) {
-            return Hit::Last;
         }
         self.trim_hit(x, y)
     }
@@ -716,7 +713,6 @@ impl Inner {
             Hit::Save => send(self.owner, "save"),
             Hit::Scissors => self.trim_toggle(),
             Hit::Drop | Hit::TPlayPause | Hit::TPreview | Hit::Codec | Hit::Export | Hit::Plan | Hit::TStatus => self.trim_click(h),
-            Hit::Last if st.last_ok => send(self.owner, "showlast"),
             Hit::Mode => {
                 let items = mode_items(&st, "mode", &st.mode, "Game (auto-detect)", "Off");
                 if let Some(cmd) = self.popup(&[Menu::List(items)], layout(Hit::Mode)) {
@@ -917,11 +913,13 @@ fn main_menu(st: &UiState) -> Vec<Menu> {
         Menu::Sub(
             "Sound".into(),
             vec![
-                Menu::List(vec![
-                    ("audio game".into(), "Game's own sound only (Game mode)".into(), st.audio == "game"),
-                    ("audio device".into(), "Everything on the device below".into(), st.audio == "device"),
-                    ("audio off".into(), "No sound".into(), st.audio == "off"),
-                ]),
+                Menu::Item(
+                    format!("audio {}", if st.audio == "off" { "on" } else { "off" }),
+                    "Record sound".into(),
+                    st.audio != "off",
+                ),
+                Menu::Disabled("Game mode: only the game's own sound".into()),
+                Menu::Disabled("Monitor modes: everything on the device below".into()),
                 Menu::Sep,
                 Menu::List(devs("device", &st.devices, &st.device, &st.default_device)),
             ],
@@ -946,6 +944,11 @@ fn main_menu(st: &UiState) -> Vec<Menu> {
             ],
         ),
         Menu::Sep,
+        Menu::Item(
+            format!("auto {}", if st.auto_game { "off" } else { "on" }),
+            "Switch to Game mode when a game is in front".into(),
+            st.auto_game,
+        ),
         Menu::Sub(
             "Shortcuts".into(),
             vec![
@@ -957,6 +960,25 @@ fn main_menu(st: &UiState) -> Vec<Menu> {
         ),
         Menu::Item(format!("startup {}", if st.startup { "off" } else { "on" }), "Start with Windows".into(), st.startup),
         Menu::Sub("Start in".into(), vec![Menu::List(starts)]),
+        Menu::Sub(
+            if st.update_ver.is_empty() { "Updates".into() } else { format!("Updates  (v{} ready)", st.update_ver) },
+            vec![
+                if !st.update_busy.is_empty() {
+                    Menu::Disabled(st.update_busy.clone())
+                } else if !st.update_ver.is_empty() {
+                    Menu::Item("update install".into(), format!("Update to v{} and restart", st.update_ver), false)
+                } else {
+                    Menu::Item("update check".into(), "Check for updates now".into(), false)
+                },
+                Menu::Disabled(format!("This is Clipper v{}", st.version)),
+                Menu::Sep,
+                Menu::Item(
+                    format!("update {}", if st.update_check { "off" } else { "on" }),
+                    "Check automatically".into(),
+                    st.update_check,
+                ),
+            ],
+        ),
         Menu::Sep,
         Menu::Item(format!("pin {}", if st.pinned { "off" } else { "on" }), "Keep on top".into(), st.pinned),
         Menu::Item("hide".into(), "Hide to tray".into(), false),

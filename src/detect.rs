@@ -81,7 +81,10 @@ pub fn foreground_game(cfg: &Config) -> Option<Target> {
             return None;
         }
         let t = target(hwnd);
-        if t.exe.is_empty() || t.pid == std::process::id() || cfg.exclude.iter().any(|e| *e == t.exe) {
+        // Python tools (screenshot overlays like Giffer's fullscreen "tk"
+        // window) are never games, whatever the exclude list says
+        let script = matches!(t.exe.as_str(), "python.exe" | "pythonw.exe");
+        if t.exe.is_empty() || script || t.pid == std::process::id() || cfg.exclude.iter().any(|e| *e == t.exe) {
             return None;
         }
         Some(t)

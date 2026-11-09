@@ -14,6 +14,10 @@ use windows::Win32::Media::Audio::{PlaySoundW, SND_ASYNC, SND_FILENAME, SND_NODE
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 use windows_core::PCWSTR;
 
+/// audio boost: target peak (-3 dBFS) and the most it may lift (+20 dB)
+const BOOST_PEAK: f32 = 23197.0;
+const BOOST_MAX: f32 = 10.0;
+
 pub fn play(path: &str) {
     let w = wide(path);
     unsafe {
@@ -33,6 +37,8 @@ pub struct SaveJob {
     pub error_sound: String,
     /// multiplier for the recorded sound
     pub audio_gain: f32,
+    /// raise quiet sound so its peak sits at BOOST_PEAK
+    pub audio_boost: bool,
     /// None when the mic is off
     pub mic_gain: Option<f32>,
     /// file name before the date: the game's name in Game mode, else "Clip"
@@ -93,9 +99,22 @@ fn save(
     // + offset = audio plays later, so read it from earlier in the buffer
     let from = t_start - job.av_offset_ms * 10_000;
     let mut pcm = audio.lock().unwrap().extract(from, audio_frames);
-    if (job.audio_gain - 1.0).abs() > 0.001 {
+    let mut gain = job.audio_gain;
+    if job.audio_boost {
+        // Loopback records the game before Windows / Sonar volume, so most
+        // games come out ~15 dB quieter than they sound. Lift the clip so its
+        // loudest moment sits at -3 dB (room for the mic), at most +20 dB so
+        // a silent clip doesn't turn into hiss. Never turns anything down.
+        let peak = pcm.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0) as f32;
+        if peak > 0.0 {
+            let lift = (BOOST_PEAK / peak).clamp(1.0, BOOST_MAX);
+            log(format!("audio boost x{lift:.2} (peak {:.1} dB)", 20.0 * (peak / 32768.0).log10()));
+            gain *= lift;
+        }
+    }
+    if (gain - 1.0).abs() > 0.001 {
         for o in pcm.iter_mut() {
-            *o = (*o as f32 * job.audio_gain).clamp(-32768.0, 32767.0) as i16;
+            *o = (*o as f32 * gain).clamp(-32768.0, 32767.0) as i16;
         }
     }
     if let Some(gain) = job.mic_gain {
