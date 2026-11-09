@@ -564,6 +564,12 @@ impl App {
             .as_ref()
             .map(|(t, ok, _)| (t.clone(), *ok))
             .unwrap_or_default();
+        // one lock, released before the struct is built (two locks in the
+        // literal below deadlocked: the first guard lives to the end of it)
+        let (update_ver, update_busy) = {
+            let s = update::STATE.lock().unwrap();
+            (s.available.as_ref().map(|r| r.version.clone()).unwrap_or_default(), s.busy.clone())
+        };
         ui::UiState {
             capturing: self.capturing(),
             mode: self.mode.key().into(),
@@ -605,8 +611,8 @@ impl App {
             hotkey_error: self.hotkey_error.clone(),
             version: update::current(),
             update_check: self.update_check,
-            update_ver: update::STATE.lock().unwrap().available.as_ref().map(|r| r.version.clone()).unwrap_or_default(),
-            update_busy: update::STATE.lock().unwrap().busy.clone(),
+            update_ver,
+            update_busy,
         }
     }
 
@@ -1471,6 +1477,13 @@ fn main() {
             a.register_hotkeys();
         });
         SetTimer(Some(hwnd), TIMER_TICK, 1000, None);
+        // a plain launch (double-click) records in the "Start in" mode
+        // instead of sitting in Off
+        if !cmds.iter().any(|c| c.starts_with("mode ") || c.starts_with("window ")) {
+            let m = if Mode::parse(&cfg.startup_mode).is_some() { cfg.startup_mode.clone() } else { "main".into() };
+            log(format!("no --mode given: starting in '{m}'"));
+            handle_command(hwnd, &format!("mode {m}"));
+        }
         for c in &cmds {
             handle_command(hwnd, c);
         }

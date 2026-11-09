@@ -162,7 +162,7 @@ impl Config {
             pinned: false,
             window_pos: None,
             prefs: Default::default(),
-            startup_mode: "off".into(),
+            startup_mode: "main".into(),
             auto_game: true,
             update_check: true,
             hotkey_save: crate::hotkey::DEFAULT_SAVE.into(),

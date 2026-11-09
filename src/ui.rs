@@ -959,7 +959,7 @@ fn main_menu(st: &UiState) -> Vec<Menu> {
             ],
         ),
         Menu::Item(format!("startup {}", if st.startup { "off" } else { "on" }), "Start with Windows".into(), st.startup),
-        Menu::Sub("Start in".into(), vec![Menu::List(starts)]),
+        Menu::Sub("When Clipper opens, record".into(), vec![Menu::List(starts)]),
         Menu::Sub(
             if st.update_ver.is_empty() { "Updates".into() } else { format!("Updates  (v{} ready)", st.update_ver) },
             vec![
